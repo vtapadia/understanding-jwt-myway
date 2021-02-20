@@ -11,9 +11,10 @@ import org.springframework.web.reactive.function.server.ServerResponse;
 @Configuration
 public class WebRouter {
     @Bean
-    public RouterFunction<ServerResponse> route(JWKHandler jwkHandler) {
+    public RouterFunction<ServerResponse> route(JWKHandler jwkHandler, JWEMessageHander jweMessageHander) {
 
         return RouterFunctions
-                .route(RequestPredicates.GET("/jwk").and(RequestPredicates.accept(MediaType.APPLICATION_JSON)), jwkHandler::jwks);
+                .route(RequestPredicates.GET("/jwk").and(RequestPredicates.accept(MediaType.APPLICATION_JSON)), jwkHandler::jwks)
+                .andRoute(RequestPredicates.GET("/secure/send"), jweMessageHander::sender);
     }
 }
