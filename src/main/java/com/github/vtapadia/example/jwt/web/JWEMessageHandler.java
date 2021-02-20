@@ -1,6 +1,7 @@
 package com.github.vtapadia.example.jwt.web;
 
 import com.github.vtapadia.example.jwt.domain.EncryptedData;
+import com.github.vtapadia.example.jwt.service.JWKService;
 import com.github.vtapadia.example.jwt.service.KeyManager;
 import com.nimbusds.jose.*;
 import com.nimbusds.jose.crypto.*;
@@ -33,10 +34,12 @@ import java.util.Map;
  */
 @Component
 @Slf4j
-public class JWEMessageHander {
+public class JWEMessageHandler {
     @Qualifier("keyManagerRSA")
     @Autowired
     private KeyManager keyManager;
+    @Autowired
+    private JWKService jwkService;
 
     private WebClient client = WebClient.create("http://localhost:8080");
 

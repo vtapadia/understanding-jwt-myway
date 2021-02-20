@@ -11,7 +11,7 @@ import org.springframework.web.reactive.function.server.ServerResponse;
 @Configuration
 public class WebRouter {
     @Bean
-    public RouterFunction<ServerResponse> route(JWKHandler jwkHandler, JWEMessageHander jweMessageHander) {
+    public RouterFunction<ServerResponse> route(JWKHandler jwkHandler, JWEMessageHandler jweMessageHander) {
 
         return RouterFunctions
                 .route(RequestPredicates.GET("/jwk").and(RequestPredicates.accept(MediaType.APPLICATION_JSON)), jwkHandler::jwks)
