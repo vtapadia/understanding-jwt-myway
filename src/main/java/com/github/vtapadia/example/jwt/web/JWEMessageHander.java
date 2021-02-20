@@ -3,31 +3,39 @@ package com.github.vtapadia.example.jwt.web;
 import com.github.vtapadia.example.jwt.domain.EncryptedData;
 import com.github.vtapadia.example.jwt.service.KeyManager;
 import com.nimbusds.jose.*;
-import com.nimbusds.jose.crypto.ECDHEncrypter;
-import com.nimbusds.jose.crypto.ECDSASigner;
-import com.nimbusds.jose.crypto.RSAEncrypter;
-import com.nimbusds.jose.crypto.RSASSASigner;
+import com.nimbusds.jose.crypto.*;
 import com.nimbusds.jose.jwk.*;
+import com.nimbusds.jwt.EncryptedJWT;
 import com.nimbusds.jwt.JWTClaimsSet;
 import com.nimbusds.jwt.SignedJWT;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
+import org.springframework.util.Assert;
 import org.springframework.web.reactive.function.BodyInserters;
+import org.springframework.web.reactive.function.client.WebClient;
 import org.springframework.web.reactive.function.server.ServerRequest;
 import org.springframework.web.reactive.function.server.ServerResponse;
 import reactor.core.publisher.Mono;
 
+import java.net.URI;
 import java.net.URL;
+import java.text.ParseException;
+import java.util.Arrays;
 import java.util.Date;
 import java.util.List;
+import java.util.Map;
 
 @Component
+@Slf4j
 public class JWEMessageHander {
     @Qualifier("keyManagerRSA")
     @Autowired
     private KeyManager keyManager;
+
+    private WebClient client = WebClient.create("http://localhost:8080");
 
     public Mono<ServerResponse> sender(ServerRequest request) {
         //Get the signing Key
@@ -96,13 +104,81 @@ public class JWEMessageHander {
 
         EncryptedData encryptedData = new EncryptedData(jweObject.serialize());
 
+        client.post().uri("/secure/receive").body(BodyInserters.fromValue(encryptedData)).exchangeToMono(response -> {
+            if (response.statusCode().is2xxSuccessful()) {
+                log.info("Success call made to receiver");
+            }
+            return response.bodyToMono(Map.class);
+        });
+
         return ServerResponse.ok().contentType(MediaType.APPLICATION_JSON)
                 .body(BodyInserters.fromValue(encryptedData));
     }
 
     public Mono<ServerResponse> receiver(ServerRequest request) {
-        return ServerResponse.ok().contentType(MediaType.APPLICATION_JSON)
-                .body(BodyInserters.fromValue(""));
+        EncryptedData encryptedData = request.bodyToMono(EncryptedData.class).block();
+
+        JWK encryptKey = keyManager.getEncryptKey();
+
+        EncryptedJWT encryptedJWT = null;
+        try {
+            encryptedJWT = EncryptedJWT.parse(encryptedData.getEncrypted());
+        } catch (ParseException e) {
+            throw new RuntimeException(e);
+        }
+        log.info("Headers::{}", encryptedJWT.getHeader());
+
+        Assert.isTrue(encryptedJWT.getHeader().getKeyID().equalsIgnoreCase(encryptKey.getKeyID()),
+                "Invalid key used for encryption");
+        Assert.isTrue(Arrays.asList(JWEAlgorithm.RSA_OAEP_256, JWEAlgorithm.ECDH_ES_A256KW).contains(encryptedJWT.getHeader().getAlgorithm()),
+                "Unsupported algorithm used for encryption");
+
+        try {
+            if (encryptKey.getKeyType() == KeyType.RSA) {
+                encryptedJWT.decrypt(new RSADecrypter(encryptKey.toRSAKey().toPrivateKey()));
+            } else if (encryptKey.getKeyType() == KeyType.EC) {
+                encryptedJWT.decrypt(new ECDHDecrypter(encryptKey.toECKey().toECPrivateKey()));
+            }
+        } catch (JOSEException e) {
+            throw new RuntimeException(e);
+        }
+
+        SignedJWT signedJWT = encryptedJWT.getPayload().toSignedJWT();
+        log.info("Signed header :: {}", signedJWT.getHeader());
+
+        //Retrieve the Signing verification key
+        JWKSet jwkSet;
+        try {
+            URL url = new URL("http://localhost:8080/jwk");
+            jwkSet = JWKSet.load(url);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+        //Select the matching public key from the JWK endpoint.
+        JWKMatcher encryptKeyMatcher = new JWKMatcher.Builder()
+                .keyUse(KeyUse.SIGNATURE)
+                .keyID(signedJWT.getHeader().getKeyID())
+                .build();
+        JWKSelector jwkSelector = new JWKSelector(encryptKeyMatcher);
+        List<JWK> keyList = jwkSelector.select(jwkSet);
+        JWK jwkSigning = keyList.get(0);
+
+        try {
+            if (jwkSigning.getKeyType() == KeyType.RSA) {
+                Assert.isTrue(signedJWT.verify(new RSASSAVerifier(jwkSigning.toRSAKey())),
+                        "Signature verification failed");
+            } else if (jwkSigning.getKeyType() == KeyType.EC) {
+                Assert.isTrue(signedJWT.verify(new ECDSAVerifier(jwkSigning.toECKey())),
+                        "Signature verification failed");
+            } else {
+                throw new RuntimeException("Unknown key type for signing");
+            }
+            log.info("Message body received:: \n{}", signedJWT.getJWTClaimsSet());
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+
+        return ServerResponse.ok().contentType(MediaType.APPLICATION_JSON).build();
     }
 
 }

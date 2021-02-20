@@ -15,6 +15,7 @@ public class WebRouter {
 
         return RouterFunctions
                 .route(RequestPredicates.GET("/jwk").and(RequestPredicates.accept(MediaType.APPLICATION_JSON)), jwkHandler::jwks)
-                .andRoute(RequestPredicates.GET("/secure/send"), jweMessageHander::sender);
+                .andRoute(RequestPredicates.GET("/secure/send"), jweMessageHander::sender)
+                .andRoute(RequestPredicates.POST("/secure/receive"), jweMessageHander::receiver);
     }
 }
