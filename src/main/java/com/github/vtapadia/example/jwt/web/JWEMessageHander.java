@@ -20,7 +20,6 @@ import org.springframework.web.reactive.function.server.ServerRequest;
 import org.springframework.web.reactive.function.server.ServerResponse;
 import reactor.core.publisher.Mono;
 
-import java.net.URI;
 import java.net.URL;
 import java.text.ParseException;
 import java.util.Arrays;
@@ -28,6 +27,10 @@ import java.util.Date;
 import java.util.List;
 import java.util.Map;
 
+/**
+ * Component showing both the sending and receiving logic for Signing and encryption of a message in JWT formats
+ * Also uses JWK to display the benefits of using keys exposed for this purpose
+ */
 @Component
 @Slf4j
 public class JWEMessageHander {
@@ -128,11 +131,14 @@ public class JWEMessageHander {
         }
         log.info("Headers::{}", encryptedJWT.getHeader());
 
+        //Here one can check and retrieve the corresponding Decryption key for the payload.
         Assert.isTrue(encryptedJWT.getHeader().getKeyID().equalsIgnoreCase(encryptKey.getKeyID()),
                 "Invalid key used for encryption");
+        //One can also ensure that the Encryption algorithms are those that are supported.
         Assert.isTrue(Arrays.asList(JWEAlgorithm.RSA_OAEP_256, JWEAlgorithm.ECDH_ES_A256KW).contains(encryptedJWT.getHeader().getAlgorithm()),
                 "Unsupported algorithm used for encryption");
 
+        //Decrypt the JWE Object
         try {
             if (encryptKey.getKeyType() == KeyType.RSA) {
                 encryptedJWT.decrypt(new RSADecrypter(encryptKey.toRSAKey().toPrivateKey()));
@@ -143,6 +149,9 @@ public class JWEMessageHander {
             throw new RuntimeException(e);
         }
 
+        log.info("Get payload type :: {}", encryptedJWT.getPayload().getClass());
+
+        //Gets the payload as a Signed JWT
         SignedJWT signedJWT = encryptedJWT.getPayload().toSignedJWT();
         log.info("Signed header :: {}", signedJWT.getHeader());
 
@@ -163,6 +172,7 @@ public class JWEMessageHander {
         List<JWK> keyList = jwkSelector.select(jwkSet);
         JWK jwkSigning = keyList.get(0);
 
+        //Signature verification
         try {
             if (jwkSigning.getKeyType() == KeyType.RSA) {
                 Assert.isTrue(signedJWT.verify(new RSASSAVerifier(jwkSigning.toRSAKey())),
@@ -173,10 +183,12 @@ public class JWEMessageHander {
             } else {
                 throw new RuntimeException("Unknown key type for signing");
             }
-            log.info("Message body received:: \n{}", signedJWT.getJWTClaimsSet());
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
+
+        //Logs the signed and encrypted payload
+        log.info("Message body received:: \n{}", signedJWT.getPayload());
 
         return ServerResponse.ok().contentType(MediaType.APPLICATION_JSON).build();
     }

@@ -23,6 +23,12 @@ public class JWKHandler {
     @Autowired
     private List<KeyManager> keyManagers;
 
+    /**
+     * JWKS endpoint
+     *
+     * @param request Server request
+     * @return response
+     */
     public Mono<ServerResponse> jwks(ServerRequest request) {
         List<JWK> keys = new ArrayList<>();
         keyManagers.forEach(k -> {
