@@ -1,6 +1,7 @@
 package com.github.vtapadia.example.jwt.service;
 
 import com.nimbusds.jose.jwk.JWKSet;
+import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Mono;
@@ -11,6 +12,13 @@ public class JWKService {
 
 
     public Mono<JWKSet> load() {
-        return client.get().uri("/jwk").retrieve().bodyToMono(JWKSet.class);
+        Mono<ResponseEntity<String>> response = client.get().uri("/jwk").retrieve().toEntity(String.class);
+        return response.map(r -> {
+            try {
+                return JWKSet.parse(r.getBody());
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        });
     }
 }

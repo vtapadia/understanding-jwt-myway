@@ -13,6 +13,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Component;
 import org.springframework.util.Assert;
 import org.springframework.web.reactive.function.BodyInserters;
@@ -110,90 +111,110 @@ public class JWEMessageHandler {
 
         EncryptedData encryptedData = new EncryptedData(jweObject.serialize());
 
-        client.post().uri("/secure/receive").body(BodyInserters.fromValue(encryptedData)).exchangeToMono(response -> {
-            if (response.statusCode().is2xxSuccessful()) {
-                log.info("Success call made to receiver");
-            }
-            return response.bodyToMono(Map.class);
-        });
+        Mono<ResponseEntity<Void>> receiver = client.post().uri("/secure/receive")
+                .body(BodyInserters.fromValue(encryptedData))
+                .exchangeToMono(response -> {
+                    if (response.statusCode().is2xxSuccessful()) {
+                        log.info("Success call made to receiver");
+                    }
+                    return response.toBodilessEntity();
+                });
 
-        return ServerResponse.ok().contentType(MediaType.APPLICATION_JSON)
-                .body(BodyInserters.fromValue(encryptedData));
+        return receiver.flatMap(r -> ServerResponse.ok().contentType(MediaType.APPLICATION_JSON)
+                .body(BodyInserters.fromValue(encryptedData)));
     }
 
     public Mono<ServerResponse> receiver(ServerRequest request) {
-        EncryptedData encryptedData = request.bodyToMono(EncryptedData.class).block();
+        Mono<EncryptedData> encryptedData = request.bodyToMono(EncryptedData.class);
+
+        Mono<JWKSet> jwkSet = jwkService.load();
 
         JWK encryptKey = keyManager.getEncryptKey();
 
-        EncryptedJWT encryptedJWT = null;
-        try {
-            encryptedJWT = EncryptedJWT.parse(encryptedData.getEncrypted());
-        } catch (ParseException e) {
-            throw new RuntimeException(e);
-        }
-        log.info("Headers::{}", encryptedJWT.getHeader());
-
-        //Here one can check and retrieve the corresponding Decryption key for the payload.
-        Assert.isTrue(encryptedJWT.getHeader().getKeyID().equalsIgnoreCase(encryptKey.getKeyID()),
-                "Invalid key used for encryption");
-        //One can also ensure that the Encryption algorithms are those that are supported.
-        Assert.isTrue(Arrays.asList(JWEAlgorithm.RSA_OAEP_256, JWEAlgorithm.ECDH_ES_A256KW).contains(encryptedJWT.getHeader().getAlgorithm()),
-                "Unsupported algorithm used for encryption");
-
-        //Decrypt the JWE Object
-        try {
-            if (encryptKey.getKeyType() == KeyType.RSA) {
-                encryptedJWT.decrypt(new RSADecrypter(encryptKey.toRSAKey().toPrivateKey()));
-            } else if (encryptKey.getKeyType() == KeyType.EC) {
-                encryptedJWT.decrypt(new ECDHDecrypter(encryptKey.toECKey().toECPrivateKey()));
+        return Mono.zip(encryptedData, jwkSet).flatMap(r -> {
+            EncryptedJWT encryptedJWT;
+            try {
+                encryptedJWT = EncryptedJWT.parse(r.getT1().getEncrypted());
+            } catch (ParseException e) {
+                throw new RuntimeException(e);
             }
-        } catch (JOSEException e) {
-            throw new RuntimeException(e);
-        }
+            log.info("Headers::{}", encryptedJWT.getHeader());
 
-        log.info("Get payload type :: {}", encryptedJWT.getPayload().getClass());
+            //Here one can check and retrieve the corresponding Decryption key for the payload.
+            Assert.isTrue(encryptedJWT.getHeader().getKeyID().equalsIgnoreCase(encryptKey.getKeyID()),
+                    "Invalid key used for encryption");
+            //One can also ensure that the Encryption algorithms are those that are supported.
+            Assert.isTrue(Arrays.asList(JWEAlgorithm.RSA_OAEP_256, JWEAlgorithm.ECDH_ES_A256KW).contains(encryptedJWT.getHeader().getAlgorithm()),
+                    "Unsupported algorithm used for encryption");
 
-        //Gets the payload as a Signed JWT
-        SignedJWT signedJWT = encryptedJWT.getPayload().toSignedJWT();
-        log.info("Signed header :: {}", signedJWT.getHeader());
+            //Decrypt the JWE Object
+            try {
+                if (encryptKey.getKeyType() == KeyType.RSA) {
+                    encryptedJWT.decrypt(new RSADecrypter(encryptKey.toRSAKey().toPrivateKey()));
+                } else if (encryptKey.getKeyType() == KeyType.EC) {
+                    encryptedJWT.decrypt(new ECDHDecrypter(encryptKey.toECKey().toECPrivateKey()));
+                }
+            } catch (JOSEException e) {
+                throw new RuntimeException(e);
+            }
+
+            log.info("Get payload type :: {}", encryptedJWT.getPayload().getClass());
+
+            //Gets the payload as a Signed JWT
+            SignedJWT signedJWT = encryptedJWT.getPayload().toSignedJWT();
+            log.info("Signed header :: {}", signedJWT.getHeader());
+            //Select the matching public key from the JWK endpoint.
+            JWKMatcher encryptKeyMatcher = new JWKMatcher.Builder()
+                    .keyUse(KeyUse.SIGNATURE)
+                    .keyID(signedJWT.getHeader().getKeyID())
+                    .build();
+            JWKSelector jwkSelector = new JWKSelector(encryptKeyMatcher);
+            List<JWK> keyList = jwkSelector.select(r.getT2());
+            JWK jwkSigning = keyList.get(0);
+
+            //Signature verification
+            try {
+                if (jwkSigning.getKeyType() == KeyType.RSA) {
+                    Assert.isTrue(signedJWT.verify(new RSASSAVerifier(jwkSigning.toRSAKey())),
+                            "Signature verification failed");
+                } else if (jwkSigning.getKeyType() == KeyType.EC) {
+                    Assert.isTrue(signedJWT.verify(new ECDSAVerifier(jwkSigning.toECKey())),
+                            "Signature verification failed");
+                } else {
+                    throw new RuntimeException("Unknown key type for signing");
+                }
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+
+            //Logs the signed and encrypted payload
+            log.info("Message body received:: \n{}", signedJWT.getPayload());
+
+            return ServerResponse.ok().contentType(MediaType.APPLICATION_JSON).build();
+        });
+
+//        Mono<EncryptedJWT> encryptedJWT = encryptedData.map(EncryptedData::getEncrypted)
+//                .map(ed -> {
+//                    EncryptedJWT jwe;
+//                    try {
+//                        jwe = EncryptedJWT.parse(ed);
+//                    } catch (ParseException e) {
+//                        throw new RuntimeException(e);
+//                    }
+//                    return jwe;
+//                });
+//
+//        encryptedJWT
 
         //Retrieve the Signing verification key
-        JWKSet jwkSet;
-        try {
-            URL url = new URL("http://localhost:8080/jwk");
-            jwkSet = JWKSet.load(url);
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
-        //Select the matching public key from the JWK endpoint.
-        JWKMatcher encryptKeyMatcher = new JWKMatcher.Builder()
-                .keyUse(KeyUse.SIGNATURE)
-                .keyID(signedJWT.getHeader().getKeyID())
-                .build();
-        JWKSelector jwkSelector = new JWKSelector(encryptKeyMatcher);
-        List<JWK> keyList = jwkSelector.select(jwkSet);
-        JWK jwkSigning = keyList.get(0);
-
-        //Signature verification
-        try {
-            if (jwkSigning.getKeyType() == KeyType.RSA) {
-                Assert.isTrue(signedJWT.verify(new RSASSAVerifier(jwkSigning.toRSAKey())),
-                        "Signature verification failed");
-            } else if (jwkSigning.getKeyType() == KeyType.EC) {
-                Assert.isTrue(signedJWT.verify(new ECDSAVerifier(jwkSigning.toECKey())),
-                        "Signature verification failed");
-            } else {
-                throw new RuntimeException("Unknown key type for signing");
-            }
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
-
-        //Logs the signed and encrypted payload
-        log.info("Message body received:: \n{}", signedJWT.getPayload());
-
-        return ServerResponse.ok().contentType(MediaType.APPLICATION_JSON).build();
+//        JWKSet jwkSet;
+//        try {
+//            URL url = new URL("http://localhost:8080/jwk");
+//            jwkSet = JWKSet.load(url);
+//        } catch (Exception e) {
+//            throw new RuntimeException(e);
+//        }
     }
+
 
 }
