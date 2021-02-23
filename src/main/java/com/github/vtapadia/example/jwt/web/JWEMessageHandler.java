@@ -92,7 +92,7 @@ public class JWEMessageHandler {
 
         //Create the JWE payload
         JWEObject jweObject = new JWEObject(
-                new JWEHeader.Builder(JWEAlgorithm.parse(jwkEncryption.getAlgorithm().getName()), EncryptionMethod.A256GCM)
+                new JWEHeader.Builder(JWEAlgorithm.parse(jwkEncryption.getAlgorithm().getName()), EncryptionMethod.A256CBC_HS512)
                         .contentType("JWT") // required to indicate nested JWT
                         .keyID(jwkEncryption.getKeyID())
                         .build(),
